@@ -4,6 +4,7 @@ import itertools
 import os
 import random
 import string
+import traceback
 import yaml
 
 s3 = bunch.Bunch()
@@ -40,40 +41,43 @@ def choose_bucket_prefix(template, max_len=30):
 def nuke_bucket(bucket):
     try:
         bucket.set_canned_acl('private')
-        # TODO: deleted_cnt and the while loop is a work around for rgw
-        # not sending the
-        deleted_cnt = 1
-        while deleted_cnt:
-            deleted_cnt = 0
-            for key in bucket.list():
-                print 'Cleaning bucket {bucket} key {key}'.format(
-                    bucket=bucket,
-                    key=key,
-                    )
-                key.set_canned_acl('private')
-                key.delete()
-                deleted_cnt += 1
+        for key in bucket.list():
+            print 'Cleaning bucket {bucket} key {key}'.format(
+                bucket=bucket,
+                key=key,
+                )
+            key.set_canned_acl('private')
+            key.delete()
         bucket.delete()
     except boto.exception.S3ResponseError as e:
-        # TODO workaround for buggy rgw that fails to send
-        # error_code, remove
-        if (e.status == 403
-            and e.error_code is None
-            and e.body == ''):
-            e.error_code = 'AccessDenied'
-        if e.error_code != 'AccessDenied':
+        if e.error_code == 'NoSuchBucket':
+            # We wanted it gone anyway...
+            pass
+        elif e.error_code == 'AccessDenied':
+            # XXX: This case represents a bug, remove when solved
+            # seems like we're not the owner of the bucket; ignore
+            pass
+        else:
             print 'GOT UNWANTED ERROR', e.error_code
             raise
-        # seems like we're not the owner of the bucket; ignore
-        pass
 
 def nuke_prefixed_buckets():
+    e = None
     for name, conn in s3.items():
         print 'Cleaning buckets from connection {name}'.format(name=name)
         for bucket in conn.get_all_buckets():
             if bucket.name.startswith(prefix):
                 print 'Cleaning bucket {bucket}'.format(bucket=bucket)
-                nuke_bucket(bucket)
+                try:
+                    nuke_bucket(bucket)
+                except boto.exception.s3ResponseError as e:
+                    # don't let these stop us from clearing as many buckets
+                    # as possible
+                    traceback.print_exc()
+
+    if e is not None:
+        # but raise the last one if there were exceptions
+        raise e
 
     print 'Done with cleanup of test buckets.'
 
